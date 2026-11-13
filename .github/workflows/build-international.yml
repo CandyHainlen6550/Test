@@ -1,0 +1,76 @@
+name: Build International HWT Import
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Check out build repository
+        uses: actions/checkout@v4
+      - name: Fetch pinned upstream sources
+        run: |
+          git clone https://github.com/nairain233/huawei-health-customization.git upstream
+          cd upstream
+          git checkout cc9c24eb8dcfcf7050b034f56966d7f32472d487
+      - name: Patch verified international hosts and regression tests
+        working-directory: upstream
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('app/src/main/assets/local-watchface-footer.js')
+          s=p.read_text()
+          old="location.origin !== 'https://h5hosting-drcn.dbankcdn.cn'"
+          new="!['https://h5hosting-drcn.dbankcdn.cn', 'https://h5hosting-dra.dbankcdn.com', 'https://h5hosting-dre.dbankcdn.com'].includes(location.origin)"
+          assert s.count(old)==1, 'unexpected JS source'
+          p.write_text(s.replace(old,new))
+          p=Path('app/src/main/java/love/nairain/huawei/watchface/LocalFacePagePolicy.kt')
+          s=p.read_text()
+          old='uri.host == "h5hosting-drcn.dbankcdn.cn"'
+          new='uri.host in setOf("h5hosting-drcn.dbankcdn.cn", "h5hosting-dra.dbankcdn.com", "h5hosting-dre.dbankcdn.com")'
+          assert s.count(old)==1, 'unexpected Kotlin source'
+          p.write_text(s.replace(old,new))
+          p=Path('app/src/test/java/love/nairain/huawei/watchface/LocalImportFailureTest.kt')
+          s=p.read_text()
+          old='assertTrue(LocalFacePagePolicy.acceptsPage("https://h5hosting-drcn.dbankcdn.cn/cch5/health/watchFace/index.html#/index"))'
+          new=old+'''
+                  assertTrue(LocalFacePagePolicy.acceptsPage("https://h5hosting-dra.dbankcdn.com/cch5/health/watchFace/index.html#/index"))
+                  assertTrue(LocalFacePagePolicy.acceptsPage("https://h5hosting-dre.dbankcdn.com/cch5/health/watchFace/index.html#/index"))
+                  assertFalse(LocalFacePagePolicy.acceptsPage("https://h5hosting-dra.dbankcdn.com.attacker.test/cch5/health/watchFace/index.html"))
+                  assertFalse(LocalFacePagePolicy.acceptsPage("https://h5hosting-dre.dbankcdn.com/other.html"))'''
+          assert s.count(old)==1, 'unexpected test source'
+          p.write_text(s.replace(old,new))
+          print('International HWT store host patch applied successfully')
+          PY
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android SDK 37 and Build Tools
+        run: sdkmanager --install "platforms;android-37" "build-tools;37.0.0"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Assemble debug APK
+        working-directory: upstream
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug --no-configuration-cache --stacktrace
+      - name: Verify APK signature
+        run: |
+          test -s upstream/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --verbose upstream/app/build/outputs/apk/debug/app-debug.apk
+          sha256sum upstream/app/build/outputs/apk/debug/app-debug.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Huawei-Health-Customization-v2.0-International-debug
+          path: upstream/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
